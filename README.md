@@ -57,6 +57,19 @@ Retries happen on network errors and on `408`, `425`, `429`, `500`, `502`,
 `503`, `504`. Other `4xx` responses fail immediately — a `404` will not become a
 `200` by asking again.
 
+### KV writes
+
+The Workers KV **binding** only supports `put(key, value)`. There is no bulk-put
+overload — bulk writes exist in the REST API and in `wrangler kv bulk put`, but
+passing an array to the binding fails with
+`parameter 2 is not of type 'string or Object'`. Each probe is therefore written
+with its own `put` call, so a check of N probes costs N writes. Budget one KV
+write per probe per interval against your plan's daily write limit: hourly
+checks of a single probe use ~24 writes/day.
+
+Bulk **get** is supported by the binding, and is used to load all probes in one
+read.
+
 ## HTTP endpoints
 
 ```bash

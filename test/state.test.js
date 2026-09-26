@@ -195,7 +195,7 @@ test('windowUptime only counts entries inside the window', () => {
   assert.equal(windowUptime([], { nowSeconds: T0 }).percent, null);
 });
 
-test('saveMany uses the { key, value } bulk-put shape, not tuples', async () => {
+test('saveMany writes one two-argument put per key, the only form the binding accepts', async () => {
   const putCalls = [];
   const recorder = {
     get: async () => null,
@@ -203,19 +203,36 @@ test('saveMany uses the { key, value } bulk-put shape, not tuples', async () => 
   };
 
   const state = applyObservation(defaultState(T0), up(T0)).state;
-  await new KvStore(recorder).saveMany(new Map([[55311, { state, history: [] }]]));
+  await new KvStore(recorder).saveMany(
+    new Map([
+      [55311, { state, history: [] }],
+      [55312, { state, history: [] }],
+    ]),
+  );
 
-  assert.equal(putCalls.length, 1);
-  const [entries] = putCalls[0];
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].key, 'probe:55311');
-  assert.equal(typeof entries[0].value, 'string');
-  assert.equal(JSON.parse(entries[0].value).state.lastKey, 'status:1');
+  assert.equal(putCalls.length, 2);
+  assert.equal(putCalls[0].length, 2);
+  assert.equal(putCalls[0][0], 'probe:55311');
+  assert.equal(typeof putCalls[0][1], 'string');
+  assert.equal(JSON.parse(putCalls[0][1]).state.lastKey, 'status:1');
+  assert.equal(putCalls[1][0], 'probe:55312');
 });
 
-test('MemoryKv rejects the tuple form the real binding also rejects', async () => {
+test('MemoryKv rejects the bulk-put form the real binding also rejects', async () => {
   const kv = new MemoryKv();
-  await assert.rejects(kv.put([['probe:1', '{}']]), /not of type 'string or Object'/);
+  await assert.rejects(kv.put([{ key: 'probe:1', value: '{}' }]), /bulk writes are not supported/);
+  await assert.rejects(kv.put([['probe:1', '{}']]), /bulk writes are not supported/);
+  await assert.rejects(kv.put(123, '{}'), /key must be a string/);
+  await assert.rejects(kv.put('probe:1', 123), /value must be a string/);
+  assert.equal(kv.map.size, 0);
+});
+
+test('MemoryKv supports bulk get, which the binding does', async () => {
+  const kv = new MemoryKv({ 'probe:55311': '{"a":1}' });
+  const many = await kv.get(['probe:55311', 'probe:55312']);
+  assert.ok(many instanceof Map);
+  assert.equal(many.get('probe:55311'), '{"a":1}');
+  assert.equal(many.get('probe:55312'), null);
 });
 
 test('KvStore round-trips records and survives corrupt values', async () => {

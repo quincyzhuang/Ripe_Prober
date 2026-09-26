@@ -172,14 +172,15 @@ export class KvStore {
     return records;
   }
 
+  /**
+   * The Workers KV binding exposes only put(key, value, options?). Bulk writes
+   * exist in the REST API and in `wrangler kv bulk put`, but not on the
+   * binding, so each key is written with its own call.
+   */
   async saveMany(records) {
-    // The KV bulk-put signature is an array of { key, value } objects. Array of
-    // [key, value] tuples is rejected by the real binding.
-    const entries = [];
     for (const [id, record] of records) {
-      entries.push({ key: kvKey(id), value: JSON.stringify(record) });
+      await this.kv.put(kvKey(id), JSON.stringify(record));
     }
-    if (entries.length > 0) await this.kv.put(entries);
   }
 }
 
