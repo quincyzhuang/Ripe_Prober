@@ -195,6 +195,29 @@ test('windowUptime only counts entries inside the window', () => {
   assert.equal(windowUptime([], { nowSeconds: T0 }).percent, null);
 });
 
+test('saveMany uses the { key, value } bulk-put shape, not tuples', async () => {
+  const putCalls = [];
+  const recorder = {
+    get: async () => null,
+    put: async (...args) => putCalls.push(args),
+  };
+
+  const state = applyObservation(defaultState(T0), up(T0)).state;
+  await new KvStore(recorder).saveMany(new Map([[55311, { state, history: [] }]]));
+
+  assert.equal(putCalls.length, 1);
+  const [entries] = putCalls[0];
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].key, 'probe:55311');
+  assert.equal(typeof entries[0].value, 'string');
+  assert.equal(JSON.parse(entries[0].value).state.lastKey, 'status:1');
+});
+
+test('MemoryKv rejects the tuple form the real binding also rejects', async () => {
+  const kv = new MemoryKv();
+  await assert.rejects(kv.put([['probe:1', '{}']]), /not of type 'string or Object'/);
+});
+
 test('KvStore round-trips records and survives corrupt values', async () => {
   const kv = new MemoryKv({ 'probe:55311': '{ not json' });
   const store = new KvStore(kv);

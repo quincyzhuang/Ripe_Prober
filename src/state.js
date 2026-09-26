@@ -173,9 +173,11 @@ export class KvStore {
   }
 
   async saveMany(records) {
+    // The KV bulk-put signature is an array of { key, value } objects. Array of
+    // [key, value] tuples is rejected by the real binding.
     const entries = [];
     for (const [id, record] of records) {
-      entries.push([kvKey(id), JSON.stringify(record)]);
+      entries.push({ key: kvKey(id), value: JSON.stringify(record) });
     }
     if (entries.length > 0) await this.kv.put(entries);
   }
