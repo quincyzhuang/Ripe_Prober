@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev`, or set with `wrangler secret put <NAME>` in production.
+# .dev.vars is gitignored - never commit real values.
+
+NTFY_TOPIC=my-private-probe-topic
+ADMIN_TOKEN=some-long-random-string
