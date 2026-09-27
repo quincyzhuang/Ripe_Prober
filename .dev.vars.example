@@ -1,5 +1,6 @@
 # Copy to .dev.vars for `wrangler dev`, or set with `wrangler secret put <NAME>` in production.
 # .dev.vars is gitignored - never commit real values.
 
-NTFY_TOPIC=my-private-probe-topic
+RESEND_API_KEY=re_your_api_key
+ALERT_EMAIL_TO=you@example.com
 ADMIN_TOKEN=some-long-random-string

@@ -9,7 +9,10 @@ import {
   isRecovery,
   observedTotals,
   observationKey,
+  pendingAlert,
   pushHistory,
+  recordAlertDelivered,
+  recordAlertFailure,
   shouldAlert,
   windowUptime,
 } from '../src/state.js';
@@ -150,6 +153,66 @@ test('isRecovery only fires for a down to up transition', () => {
   const unreachableState = applyObservation(first.state, unreachable(T0 + HOUR));
   assert.equal(isRecovery({ previous: unreachableState.state, observation: up(T0 + 2 * HOUR) }), true);
   assert.equal(isRecovery({ previous: first.state, observation: up(T0 + HOUR) }), false);
+});
+
+test('a failed delivery is retried on later runs even though changed is false', () => {
+  const first = applyObservation(defaultState(T0), up(T0));
+  const second = applyObservation(first.state, down(T0 + HOUR));
+  assert.equal(second.changed, true);
+
+  // The publish fails, so lastAlertedKey stays at the old key and the pending
+  // marker points at the new one.
+  const failed = recordAlertFailure(second.state, second.key, T0 + HOUR);
+  assert.equal(failed.lastAlertedKey, null);
+  assert.equal(failed.pendingAlertKey, 'status:2');
+
+  // Next check sees the same status, so there is no transition any more.
+  const third = applyObservation(failed, down(T0 + 2 * HOUR));
+  assert.equal(third.changed, false);
+  assert.equal(shouldAlert({ isInitial: false, changed: third.changed, alerting }), false);
+
+  // But the pending marker re-arms it once the backoff has elapsed.
+  assert.equal(pendingAlert(failed, third.key, { nowSeconds: T0 + HOUR }), false);
+  assert.equal(pendingAlert(failed, third.key, { nowSeconds: T0 + 2 * HOUR }), true);
+  assert.equal(shouldAlert({ isInitial: false, changed: false, alerting, pending: true }), true);
+});
+
+test('a delivered alert clears the pending marker and stops re-alerting', () => {
+  const first = applyObservation(defaultState(T0), up(T0));
+  const second = applyObservation(first.state, down(T0 + HOUR));
+  const failed = recordAlertFailure(second.state, second.key, T0 + HOUR);
+  const delivered = recordAlertDelivered(failed, second.key, T0 + 2 * HOUR);
+
+  assert.equal(delivered.lastAlertedKey, 'status:2');
+  assert.equal(delivered.lastAlertedAt, T0 + 2 * HOUR);
+  assert.equal(delivered.pendingAlertKey, null);
+  assert.equal(pendingAlert(delivered, 'status:2', { nowSeconds: T0 + 99 * HOUR }), false);
+});
+
+test('repeated failures back off and reset when the status changes', () => {
+  let state = recordAlertFailure(defaultState(T0), 'status:2', T0);
+  assert.equal(state.pendingAlertAttempts, 1);
+  assert.equal(state.pendingAlertNotBefore, T0 + 1800);
+
+  state = recordAlertFailure(state, 'status:2', T0 + 1800);
+  assert.equal(state.pendingAlertAttempts, 2);
+  assert.equal(state.pendingAlertNotBefore, T0 + 1800 + 3600);
+
+  // The delay caps at 6h, measured from the check that failed.
+  let capped = state;
+  for (let i = 0; i < 10; i += 1) capped = recordAlertFailure(capped, 'status:2', T0 + i * HOUR);
+  assert.equal(capped.pendingAlertNotBefore - (T0 + 9 * HOUR), 6 * HOUR);
+
+  // A new status is a new situation, so the backoff starts over.
+  const fresh = recordAlertFailure(state, 'unreachable', T0 + 1800);
+  assert.equal(fresh.pendingAlertAttempts, 1);
+  assert.equal(fresh.pendingAlertKey, 'unreachable');
+});
+
+test('pendingAlert ignores a marker left over from a different status', () => {
+  const failed = recordAlertFailure(defaultState(T0), 'status:2', T0);
+  assert.equal(pendingAlert(failed, 'status:1', { nowSeconds: T0 + 99 * HOUR }), false);
+  assert.equal(pendingAlert(failed, UNREACHABLE_KEY, { nowSeconds: T0 + 99 * HOUR }), false);
 });
 
 test('pushHistory keeps only the newest entries', () => {

@@ -5,11 +5,14 @@ import {
   applyObservation,
   isRecovery,
   observedTotals,
+  pendingAlert,
   pushHistory,
+  recordAlertDelivered,
+  recordAlertFailure,
   shouldAlert,
   windowUptime,
 } from './state.js';
-import { buildMessage, notifyNtfy } from './notify.js';
+import { buildMessage, notifyEmail } from './notify.js';
 
 async function observe(probeId, config, fetchImpl) {
   try {
@@ -66,7 +69,7 @@ function probeStub(probeId, previousState) {
   };
 }
 
-function summarize(probeId, { state, previous, observation, probe, isInitial, changed, alerted, suppressed, recovery, observed, window }) {
+function summarize(probeId, { state, previous, observation, probe, isInitial, changed, alerted, suppressed, recovery, retrying, observed, window }) {
   const resolved = probe ?? probeStub(probeId, state);
   const up = Boolean(observation.reachable && observation.up);
 
@@ -80,6 +83,8 @@ function summarize(probeId, { state, previous, observation, probe, isInitial, ch
     alerted,
     suppressed,
     recovery,
+    retrying,
+    pendingAlert: state.pendingAlertKey ?? null,
     error: observation.error,
     status: {
       id: observation.reachable ? observation.statusId : null,
@@ -140,10 +145,22 @@ export async function runCheck({ config, kv, fetchImpl = globalThis.fetch, now =
     // probe was already broken when you deployed, not to confirm it is fine.
     const healthyBaseline = applied.isInitial && observation.reachable && observation.up === true;
 
+    // An earlier run already saw this transition but could not deliver it, so
+    // `changed` will be false from here on. This is what keeps a failed publish
+    // from consuming the transition.
+    const retrying = pendingAlert(applied.state, applied.key, {
+      nowSeconds: observation.checkedAt,
+    });
+
     if (healthyBaseline) {
       suppressed = true;
     } else if (
-      shouldAlert({ isInitial: applied.isInitial, changed: applied.changed, alerting: config.alerting })
+      shouldAlert({
+        isInitial: applied.isInitial,
+        changed: applied.changed,
+        alerting: config.alerting,
+        pending: retrying,
+      })
     ) {
       if (recovery && !config.alerting.recoveryAlert) {
         suppressed = true;
@@ -159,13 +176,16 @@ export async function runCheck({ config, kv, fetchImpl = globalThis.fetch, now =
           recovery,
         });
         try {
-          await notifyNtfy(config, message, { fetchImpl });
+          await notifyEmail(config, message, { fetchImpl });
           alerted = true;
-          applied.state.lastAlertedKey = applied.key;
-          applied.state.lastAlertedAt = observation.checkedAt;
+          applied.state = recordAlertDelivered(applied.state, applied.key, observation.checkedAt);
         } catch (error) {
           suppressed = true;
-          console.error(`ntfy publish failed for probe ${probeId}: ${error?.message ?? error}`);
+          applied.state = recordAlertFailure(applied.state, applied.key, observation.checkedAt, {
+            baseSeconds: config.alerting.retryBaseSeconds,
+            maxSeconds: config.alerting.retryMaxSeconds,
+          });
+          console.error(`alert email failed for probe ${probeId}: ${error?.message ?? error}`);
         }
       }
     }
@@ -183,6 +203,7 @@ export async function runCheck({ config, kv, fetchImpl = globalThis.fetch, now =
         alerted,
         suppressed,
         recovery,
+        retrying,
         observed,
         window,
       }),
@@ -225,6 +246,7 @@ export async function readReport({ config, kv, now = () => Date.now() }) {
         alerted: false,
         suppressed: false,
         recovery: false,
+        retrying: pendingAlert(state, state.lastKey, { nowSeconds: checkedAtSeconds }),
         observed: observedTotals(state),
         window: windowUptime(history, {
           nowSeconds: checkedAtSeconds,

@@ -20,7 +20,8 @@ function makeEnv(overrides = {}) {
   return {
     STATE: new MemoryKv(),
     PROBE_IDS: '55311',
-    NTFY_TOPIC: 'probe-alerts',
+    RESEND_API_KEY: 're_test_key',
+    ALERT_EMAIL_TO: 'ops@example.com',
     ADMIN_TOKEN: TOKEN,
     RETRY_BACKOFF_MS: '0',
     ...overrides,

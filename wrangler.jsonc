@@ -1,39 +1,41 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ripe-prober",
-  "main": "src/index.js",
-  "compatibility_date": "2026-09-01",
-  "workers_dev": true,
-  "observability": {
-    "enabled": true
-  },
-
-  // Change this to re-schedule. "0 * * * *" = every hour on the hour.
-  // "*/15 * * * *" = every 15 minutes.
-  // "*/5 * * * *" = every 5 minutes.
-  "triggers": {
-    "crons": ["0 * * * *"]
-  },
-
-  "vars": {
-    "PROBE_IDS": "55311",
-    "ATLAS_BASE_URL": "https://atlas.ripe.net",
-    "NTFY_SERVER": "https://ntfy.sh",
-    "REQUEST_ATTEMPTS": "3",
-    "RETRY_BACKOFF_MS": "500",
-    "REQUEST_TIMEOUT_MS": "10000",
-    "MAX_RETRY_DELAY_MS": "30000",
-    "ALERT_ON_FIRST_RUN": "false",
-    "RECOVERY_ALERT": "true",
-    "HISTORY_LIMIT": "720",
-    "OBSERVED_WINDOW_SECONDS": "86400",
-    "MAX_SAMPLE_SECONDS": "21600"
-  },
-
-  "kv_namespaces": [
-    {
-      "binding": "STATE",
-      "id": "REPLACE_ME_WITH_THE_ID_FROM_wrangler_kv_namespace_create_STATE"
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ripe-prober",
+	"main": "src/index.js",
+	"compatibility_date": "2026-09-01",
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	// Change this to re-schedule. "0 * * * *" = every hour on the hour.
+	// "*/15 * * * *" = every 15 minutes.
+	// "*/5 * * * *" = every 5 minutes.
+	"triggers": {
+		"crons": [
+			"*/30 * * * *"
+		]
+	},
+	"vars": {
+		"PROBE_IDS": "55311",
+		"ATLAS_BASE_URL": "https://atlas.ripe.net",
+		"ALERT_EMAIL_FROM": "RIPE Atlas alerts <onboarding@resend.dev>",
+		"REQUEST_ATTEMPTS": "3",
+		"RETRY_BACKOFF_MS": "500",
+		"REQUEST_TIMEOUT_MS": "10000",
+		"MAX_RETRY_DELAY_MS": "30000",
+		"ALERT_ON_FIRST_RUN": "false",
+		"RECOVERY_ALERT": "true",
+		"ALERT_RETRY_BASE_SECONDS": "1800",
+		"ALERT_RETRY_MAX_SECONDS": "21600",
+		"HISTORY_LIMIT": "720",
+		"OBSERVED_WINDOW_SECONDS": "86400",
+		"MAX_SAMPLE_SECONDS": "21600"
+	},
+	"kv_namespaces": [
+		{
+			"binding": "STATE",
+			"id": "REPLACE_ME_WITH_THE_ID_FROM_wrangler_kv_namespace_create_STATE",
+			"remote": true
+		}
+	]
 }

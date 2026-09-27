@@ -9,7 +9,8 @@ const NOTIFY = process.argv.includes('--notify');
 
 const config = loadConfig({
   PROBE_IDS: process.env.PROBE_IDS ?? '55311',
-  NTFY_TOPIC: NOTIFY ? process.env.NTFY_TOPIC : 'local-check-noop',
+  RESEND_API_KEY: NOTIFY ? process.env.RESEND_API_KEY : 'local-check-noop',
+  ALERT_EMAIL_TO: NOTIFY ? process.env.ALERT_EMAIL_TO : 'nobody@example.invalid',
   RETRY_BACKOFF_MS: '0',
 });
 
@@ -29,7 +30,7 @@ function probePayload(statusId, statusName) {
 }
 
 const kv = new MemoryKv();
-const publishes = [];
+const sent = [];
 
 function makeFetch({ statusId, statusName, atlasFails = false }) {
   return async (url, init) => {
@@ -40,7 +41,7 @@ function makeFetch({ statusId, statusName, atlasFails = false }) {
         headers: { 'content-type': 'application/json' },
       });
     }
-    publishes.push({ url, body: JSON.parse(init.body) });
+    sent.push({ url, body: JSON.parse(init.body) });
     return new Response('ok', { status: 200 });
   };
 }
@@ -64,7 +65,7 @@ async function step(label, options, offsetHours) {
   );
 }
 
-console.log(`probes: ${config.probeIds.join(', ')}   notify: ${NOTIFY ? 'yes' : 'no (no-op topic)'}\n`);
+console.log(`probes: ${config.probeIds.join(', ')}   notify: ${NOTIFY ? 'yes' : 'no (unconfigured)'}\n`);
 
 await step('1. first run', { statusId: 1, statusName: 'Connected' }, 0);
 await step('2. still up', { statusId: 1, statusName: 'Connected' }, 1);
@@ -73,7 +74,7 @@ await step('4. still down', { statusId: 2, statusName: 'Disconnected' }, 3);
 await step('5. recovered', { statusId: 1, statusName: 'Connected' }, 4);
 await step('6. atlas API down', { statusId: 1, statusName: 'Connected', atlasFails: true }, 5);
 
-console.log(`\ntotal ntfy publishes: ${publishes.length}`);
-for (const publish of publishes) {
-  console.log(`  [${publish.body.priority}] ${publish.body.title} (${publish.body.tags.join(',')})`);
+console.log(`\ntotal emails: ${sent.length}`);
+for (const email of sent) {
+  console.log(`  -> ${email.body.to.join(', ')}  ${email.body.subject}`);
 }

@@ -21,8 +21,9 @@ export function buildMessage({
 }) {
   const isUp = Boolean(observation.reachable && observation.up);
 
+  // Email has no priority field, so urgency is carried in the subject where it
+  // survives threading and shows up in the inbox list.
   const header = recovery ? 'RECOVERED' : isUp ? 'UP' : 'DOWN';
-  const title = `Atlas ${probe.id} ${header}`;
 
   const lines = [];
   const location = locationLine(probe);
@@ -51,32 +52,47 @@ export function buildMessage({
   lines.push(`Checked: ${formatTimestamp(observation.checkedAt)}`);
 
   return {
-    topic: config.ntfy.topic,
-    title,
-    message: lines.join('\n'),
-    priority: recovery ? 2 : isUp ? 1 : 3,
-    tags: recovery ? ['white_check_mark'] : isUp ? ['information_source'] : ['warning'],
+    subject: `[${header}] RIPE Atlas probe ${probe.id} — ${
+      observation.reachable ? observation.statusName : 'API unreachable'
+    }`,
+    text: lines.join('\n'),
   };
 }
 
-export async function notifyNtfy(config, message, options = {}) {
+export async function notifyEmail(config, message, options = {}) {
   const { fetchImpl = globalThis.fetch } = options;
-  if (!config.ntfy.enabled) return { skipped: true };
+  if (!config.email.enabled) return { skipped: true };
 
-  const url = `${config.ntfy.server}/${encodeURIComponent(config.ntfy.topic)}`;
+  const url = config.email.apiUrl;
 
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: {
+      authorization: `Bearer ${config.email.apiKey}`,
       'content-type': 'application/json',
       'cache-control': 'no-store',
     },
-    body: JSON.stringify(message),
+    body: JSON.stringify({
+      from: config.email.from,
+      to: [config.email.to],
+      subject: message.subject,
+      text: message.text,
+    }),
   });
 
   if (!response.ok) {
-    throw new Error(`ntfy returned HTTP ${response.status} for ${url}`);
+    // Resend explains the refusal in the body; surface it rather than the bare
+    // status, which is what made a rate-limited push undiagnosable.
+    const detail = await response.text().catch(() => '');
+    throw new Error(
+      `resend returned HTTP ${response.status} for ${url}${detail ? `: ${truncate(detail)}` : ''}`,
+    );
   }
 
   return { skipped: false, url };
+}
+
+function truncate(text, max = 200) {
+  const flat = String(text).replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
