@@ -32,6 +32,8 @@ function logSummary(result, trigger) {
   const parts = result.probes.map((probe) => {
     const state = !probe.reachable ? 'unreachable' : probe.status.name;
     const flags = [probe.changed ? 'CHANGED' : 'same', probe.alerted ? 'alerted' : 'no-alert'];
+    if (probe.retrying) flags.push('RETRYING');
+    else if (probe.suppressed) flags.push('suppressed');
     return `${probe.id}=${state} [${flags.join(',')}]`;
   });
   console.log(`[${trigger}] ${parts.join(' ')}`);

@@ -1,6 +1,7 @@
 const DEFAULT_PROBE_IDS = '55311';
 const DEFAULT_BASE_URL = 'https://atlas.ripe.net';
-const DEFAULT_NTFY_SERVER = 'https://ntfy.sh';
+const DEFAULT_RESEND_API_URL = 'https://api.resend.com';
+const DEFAULT_EMAIL_FROM = 'RIPE Atlas alerts <onboarding@resend.dev>';
 
 function toInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -33,15 +34,22 @@ export function loadConfig(env = {}) {
     throw new Error('PROBE_IDS must contain at least one numeric probe id');
   }
 
-  const ntfyTopic = String(env.NTFY_TOPIC ?? '').trim();
+  const apiKey = String(env.RESEND_API_KEY ?? '').trim();
+  const to = String(env.ALERT_EMAIL_TO ?? '').trim();
+
+  // Both halves are required. Reporting this as a single boolean is what let a
+  // misspelled secret disable alerting with no error and no log line.
+  const emailEnabled = apiKey.length > 0 && to.length > 0;
 
   return {
     probeIds,
     baseUrl: stripTrailingSlash(env.ATLAS_BASE_URL || DEFAULT_BASE_URL),
-    ntfy: {
-      server: stripTrailingSlash(env.NTFY_SERVER || DEFAULT_NTFY_SERVER),
-      topic: ntfyTopic,
-      enabled: ntfyTopic.length > 0,
+    email: {
+      apiUrl: `${stripTrailingSlash(env.RESEND_API_URL || DEFAULT_RESEND_API_URL)}/emails`,
+      apiKey,
+      to,
+      from: String(env.ALERT_EMAIL_FROM || DEFAULT_EMAIL_FROM).trim(),
+      enabled: emailEnabled,
     },
     request: {
       attempts: Math.max(1, toInt(env.REQUEST_ATTEMPTS, 3)),
@@ -50,9 +58,11 @@ export function loadConfig(env = {}) {
       maxDelayMs: Math.max(0, toInt(env.MAX_RETRY_DELAY_MS, 30_000)),
     },
     alerting: {
-      enabled: ntfyTopic.length > 0,
+      enabled: emailEnabled,
       alertOnFirstRun: toBool(env.ALERT_ON_FIRST_RUN, false),
       recoveryAlert: toBool(env.RECOVERY_ALERT, true),
+      retryBaseSeconds: Math.max(0, toInt(env.ALERT_RETRY_BASE_SECONDS, 1800)),
+      retryMaxSeconds: Math.max(0, toInt(env.ALERT_RETRY_MAX_SECONDS, 21_600)),
     },
     history: {
       limit: Math.max(1, toInt(env.HISTORY_LIMIT, 720)),

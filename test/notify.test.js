@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadConfig, parseProbeIds } from '../src/config.js';
-import { buildMessage, notifyNtfy } from '../src/notify.js';
+import { buildMessage, notifyEmail } from '../src/notify.js';
 
 const HOUR = 3600;
 const T0 = 1_790_000_000;
 
-const config = loadConfig({ PROBE_IDS: '55311', NTFY_TOPIC: 'probe-alerts' });
+const config = loadConfig({
+  PROBE_IDS: '55311',
+  RESEND_API_KEY: 're_test_key',
+  ALERT_EMAIL_TO: 'ops@example.com',
+});
 
 const probe = {
   id: 55311,
@@ -53,7 +57,8 @@ test('loadConfig rejects an empty probe list', () => {
 test('loadConfig reads booleans and numbers', () => {
   const loaded = loadConfig({
     PROBE_IDS: '1',
-    NTFY_TOPIC: 'x',
+    RESEND_API_KEY: 're_x',
+    ALERT_EMAIL_TO: 'x@example.com',
     REQUEST_ATTEMPTS: '5',
     ALERT_ON_FIRST_RUN: 'true',
     RECOVERY_ALERT: 'no',
@@ -62,31 +67,42 @@ test('loadConfig reads booleans and numbers', () => {
   assert.equal(loaded.request.attempts, 5);
   assert.equal(loaded.alerting.alertOnFirstRun, true);
   assert.equal(loaded.alerting.recoveryAlert, false);
-  assert.equal(loaded.ntfy.enabled, true);
+  assert.equal(loaded.email.enabled, true);
+});
+
+test('email needs both an api key and a recipient to be considered enabled', () => {
+  const noKey = loadConfig({ PROBE_IDS: '1', ALERT_EMAIL_TO: 'ops@example.com' });
+  const noRecipient = loadConfig({ PROBE_IDS: '1', RESEND_API_KEY: 're_x' });
+  const blank = loadConfig({ PROBE_IDS: '1', RESEND_API_KEY: '  ', ALERT_EMAIL_TO: '' });
+
+  assert.equal(noKey.email.enabled, false);
+  assert.equal(noKey.alerting.enabled, false);
+  assert.equal(noRecipient.email.enabled, false);
+  assert.equal(noRecipient.alerting.enabled, false);
+  assert.equal(blank.alerting.enabled, false);
 });
 
 test('a disconnect alert is urgent and names the probe', () => {
   const message = buildMessage(baseArgs);
 
-  assert.equal(message.title, 'Atlas 55311 DOWN');
-  assert.equal(message.priority, 3);
-  assert.deepEqual(message.tags, ['warning']);
-  assert.equal(message.topic, 'probe-alerts');
-  assert.match(message.message, /Austin, TX Google Fiber · AS16591 · 136\.62\.1\.41 · US/);
-  assert.match(message.message, /Status: Disconnected \(id 2\)/);
-  assert.match(message.message, /API total uptime: 1796d 14h 56m/);
-  assert.match(message.message, /Observed uptime: 99\.50%/);
-  assert.match(message.message, /Uptime last 1d 0h 0m: 50\.00% \(2 checks\)/);
-  assert.match(message.message, /^Checked: \d{4}-\d{2}-\d{2}T/m);
+  assert.equal(message.subject, '[DOWN] RIPE Atlas probe 55311 — Disconnected');
+  assert.match(message.text, /Austin, TX Google Fiber · AS16591 · 136\.62\.1\.41 · US/);
+  assert.match(message.text, /Status: Disconnected \(id 2\)/);
+  assert.match(message.text, /API total uptime: 1796d 14h 56m/);
+  assert.match(message.text, /Observed uptime: 99\.50%/);
+  assert.match(message.text, /Uptime last 1d 0h 0m: 50\.00% \(2 checks\)/);
+  assert.match(message.text, /^Checked: \d{4}-\d{2}-\d{2}T/m);
 });
 
 test('a recovery alert is calmer and mentions the previous status', () => {
-  const message = buildMessage({ ...baseArgs, recovery: true, observation: { ...observation, up: true, statusId: 1, statusName: 'Connected' } });
+  const message = buildMessage({
+    ...baseArgs,
+    recovery: true,
+    observation: { ...observation, up: true, statusId: 1, statusName: 'Connected' },
+  });
 
-  assert.equal(message.title, 'Atlas 55311 RECOVERED');
-  assert.equal(message.priority, 2);
-  assert.deepEqual(message.tags, ['white_check_mark']);
-  assert.match(message.message, /Previous: Connected/);
+  assert.equal(message.subject, '[RECOVERED] RIPE Atlas probe 55311 — Connected');
+  assert.match(message.text, /Previous: Connected/);
 });
 
 test('an unreachable API is reported as such', () => {
@@ -96,48 +112,88 @@ test('an unreachable API is reported as such', () => {
     observation: { ...observation, reachable: false, error: 'HTTP 503 for https://atlas.ripe.net/api/v2/probes/55311' },
   });
 
-  assert.equal(message.title, 'Atlas 55311 DOWN');
-  assert.match(message.message, /Atlas API unreachable after 3 attempt\(s\): HTTP 503/);
+  assert.match(message.subject, /\[DOWN\]/);
+  assert.match(message.subject, /API unreachable/);
+  assert.match(message.text, /Atlas API unreachable after 3 attempt\(s\): HTTP 503/);
 });
 
-test('notifyNtfy posts JSON with no-store headers', async () => {
+test('notifyEmail posts a bearer-authenticated payload', async () => {
   const calls = [];
-  const result = await notifyNtfy(config, { topic: 'probe-alerts', title: 't', message: 'm' }, {
+  const result = await notifyEmail(config, { subject: 's', text: 't' }, {
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
-      return new Response('ok', { status: 200 });
+      return new Response('{"id":"msg_1"}', { status: 200 });
     },
   });
 
   assert.equal(result.skipped, false);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'https://ntfy.sh/probe-alerts');
+  assert.equal(calls[0].url, 'https://api.resend.com/emails');
   assert.equal(calls[0].init.method, 'POST');
-  assert.equal(calls[0].init.headers['cache-control'], 'no-store');
+  assert.equal(calls[0].init.headers.authorization, 'Bearer re_test_key');
   assert.equal(calls[0].init.headers['content-type'], 'application/json');
-  assert.deepEqual(JSON.parse(calls[0].init.body), { topic: 'probe-alerts', title: 't', message: 'm' });
+  assert.equal(calls[0].init.headers['cache-control'], 'no-store');
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    from: 'RIPE Atlas alerts <onboarding@resend.dev>',
+    to: ['ops@example.com'],
+    subject: 's',
+    text: 't',
+  });
 });
 
-test('notifyNtfy honours a custom server and skips when unconfigured', async () => {
-  const custom = loadConfig({ NTFY_TOPIC: 'probe-alerts', NTFY_SERVER: 'https://ntfy.example.com/' });
+test('notifyEmail honours a custom from address and api url', async () => {
+  const custom = loadConfig({
+    RESEND_API_KEY: 're_test_key',
+    ALERT_EMAIL_TO: 'ops@example.com',
+    RESEND_API_URL: 'https://api.resend.example.com/',
+    ALERT_EMAIL_FROM: 'Atlas <alerts@example.com>',
+  });
   const calls = [];
-  await notifyNtfy(custom, { topic: 'probe-alerts' }, {
-    fetchImpl: async (url) => {
-      calls.push(url);
-      return new Response('ok', { status: 200 });
+  await notifyEmail(custom, { subject: 's', text: 't' }, {
+    fetchImpl: async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return new Response('{"id":"msg_1"}', { status: 200 });
     },
   });
-  assert.deepEqual(calls, ['https://ntfy.example.com/probe-alerts']);
 
-  const unconfigured = loadConfig({ PROBE_IDS: '1' });
-  assert.deepEqual(await notifyNtfy(unconfigured, { topic: 'x' }, { fetchImpl: async () => assert.fail('must not send') }), { skipped: true });
+  assert.deepEqual(calls, [
+    { url: 'https://api.resend.example.com/emails', body: { from: 'Atlas <alerts@example.com>', to: ['ops@example.com'], subject: 's', text: 't' } },
+  ]);
 });
 
-test('notifyNtfy throws when ntfy rejects the publish', async () => {
-  await assert.rejects(
-    notifyNtfy(config, { topic: 'probe-alerts' }, {
-      fetchImpl: async () => new Response('nope', { status: 413 }),
-    }),
-    /ntfy returned HTTP 413/,
+test('notifyEmail skips when unconfigured instead of throwing', async () => {
+  const unconfigured = loadConfig({ PROBE_IDS: '1' });
+  assert.deepEqual(
+    await notifyEmail(unconfigured, { subject: 's' }, { fetchImpl: async () => assert.fail('must not send') }),
+    { skipped: true },
   );
+});
+
+test('notifyEmail surfaces the provider error body, not just the status', async () => {
+  await assert.rejects(
+    notifyEmail(config, { subject: 's', text: 't' }, {
+      fetchImpl: async () => new Response(
+        '{"statusCode":429,"message":"Too many requests. You can only send 2 emails per second."}',
+        { status: 429 },
+      ),
+    }),
+    /resend returned HTTP 429 for https:\/\/api\.resend\.com\/emails: .*Too many requests/,
+  );
+});
+
+test('notifyEmail makes a single attempt when the provider rate limits', async () => {
+  let calls = 0;
+
+  await assert.rejects(
+    notifyEmail(config, { subject: 's', text: 't' }, {
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response('rate limited', { status: 429 });
+      },
+    }),
+    /resend returned HTTP 429/,
+  );
+  // Retrying inside one invocation cannot help a per-second quota, and the
+  // cross-run retry in state.js is what recovers a missed alert.
+  assert.equal(calls, 1);
 });

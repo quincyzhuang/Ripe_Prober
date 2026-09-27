@@ -19,6 +19,9 @@ export function defaultState(checkedAt) {
     lastStatusSince: null,
     lastAlertedKey: null,
     lastAlertedAt: null,
+    pendingAlertKey: null,
+    pendingAlertAttempts: 0,
+    pendingAlertNotBefore: 0,
     totalUptimeSeconds: 0,
     observedUpSeconds: 0,
     observedDownSeconds: 0,
@@ -82,12 +85,58 @@ export function applyObservation(previousState, observation, options = {}) {
  * Alerts fire on transitions only, so a three-day outage produces one push
  * instead of 72. The first observation is treated as baseline unless
  * alertOnFirstRun is set.
+ *
+ * `pending` re-arms an alert whose delivery already failed. Without it a
+ * transient delivery error silently swallows the notification: the observation key
+ * has advanced, so the next check reports `changed: false` and the transition
+ * is never re-evaluated.
  */
-export function shouldAlert({ isInitial, changed, alerting }) {
+export function shouldAlert({ isInitial, changed, alerting, pending = false }) {
   if (!alerting.enabled) return false;
   if (changed) return true;
+  if (pending) return true;
   if (isInitial && alerting.alertOnFirstRun) return true;
   return false;
+}
+
+/** True when a previous delivery for this same key failed and is due a retry. */
+export function pendingAlert(previousState, key, options = {}) {
+  const { nowSeconds = 0 } = options;
+  const state = previousState ?? defaultState(nowSeconds);
+  if (state.pendingAlertKey !== key) return false;
+  return nowSeconds >= state.pendingAlertNotBefore;
+}
+
+/**
+ * Records a failed delivery and schedules the next attempt. The delay doubles
+ * per consecutive failure so an undeliverable alert cannot be retried on every
+ * cron tick forever. A different key restarts the backoff.
+ */
+export function recordAlertFailure(previousState, key, checkedAt, options = {}) {
+  const { baseSeconds = 1800, maxSeconds = 6 * 3600 } = options;
+  const state = previousState ?? defaultState(checkedAt);
+  const attempts = state.pendingAlertKey === key ? (state.pendingAlertAttempts ?? 0) + 1 : 1;
+
+  return {
+    ...state,
+    pendingAlertKey: key,
+    pendingAlertAttempts: attempts,
+    pendingAlertNotBefore: checkedAt + Math.min(baseSeconds * 2 ** (attempts - 1), maxSeconds),
+  };
+}
+
+/** Marks the key as delivered, clearing any outstanding retry. */
+export function recordAlertDelivered(previousState, key, checkedAt) {
+  const state = previousState ?? defaultState(checkedAt);
+
+  return {
+    ...state,
+    lastAlertedKey: key,
+    lastAlertedAt: checkedAt,
+    pendingAlertKey: null,
+    pendingAlertAttempts: 0,
+    pendingAlertNotBefore: 0,
+  };
 }
 
 export function isRecovery({ previous, observation }) {

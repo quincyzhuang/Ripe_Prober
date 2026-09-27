@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Worker that watches RIPE Atlas probe status and pushes alerts via ntfy",
+  "description": "Cloudflare Worker that watches RIPE Atlas probe status and emails alerts via Resend",
   "scripts": {
     "test": "node --test",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "kv:create": "wrangler kv namespace create STATE",
-    "secret:token": "wrangler secret put NTFY_TOPIC",
+    "secret:token": "wrangler secret put RESEND_API_KEY",
     "secret:admin": "wrangler secret put ADMIN_TOKEN",
     "check:local": "node scripts/local-check.js"
   },

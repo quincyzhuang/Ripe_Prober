@@ -10,7 +10,8 @@ const T0 = 1_790_000_000;
 const makeConfig = (overrides = {}) =>
   loadConfig({
     PROBE_IDS: '55311',
-    NTFY_TOPIC: 'probe-alerts',
+    RESEND_API_KEY: 're_test_key',
+    ALERT_EMAIL_TO: 'ops@example.com',
     RETRY_BACKOFF_MS: '0',
     ...overrides,
   });
@@ -75,8 +76,7 @@ test('alertOnFirstRun reports a probe that is already down at deploy time', asyn
   const initial = await run(0);
   assert.equal(initial.probes[0].alerted, true);
   assert.equal(publishes.length, 1);
-  assert.equal(publishes[0].title, 'Atlas 55311 DOWN');
-  assert.equal(publishes[0].priority, 3);
+  assert.match(publishes[0].subject, /\[DOWN\]/);
 });
 
 test('a healthy first run is baseline, not an alert', async () => {
@@ -104,8 +104,7 @@ test('exactly one push per transition, none for a steady state', async () => {
   assert.equal(wentDown.probes[0].changed, true);
   assert.equal(wentDown.probes[0].alerted, true);
   assert.equal(publishes.length, 1);
-  assert.equal(publishes[0].title, 'Atlas 55311 DOWN');
-  assert.equal(publishes[0].priority, 3);
+  assert.match(publishes[0].subject, /\[DOWN\]/);
 
   const stillDown = await run(3);
   assert.equal(stillDown.probes[0].changed, false);
@@ -117,8 +116,8 @@ test('exactly one push per transition, none for a steady state', async () => {
   assert.equal(recovered.probes[0].recovery, true);
   assert.equal(recovered.probes[0].alerted, true);
   assert.equal(publishes.length, 2);
-  assert.equal(publishes[1].title, 'Atlas 55311 RECOVERED');
-  assert.match(publishes[1].message, /Previous: Disconnected/);
+  assert.match(publishes[1].subject, /\[RECOVERED\]/);
+  assert.match(publishes[1].text, /Previous: Disconnected/);
 
   const stillUp = await run(5);
   assert.equal(stillUp.probes[0].alerted, false);
@@ -153,7 +152,7 @@ test('a persistent HTTP failure is reported as unreachable after retries', async
   assert.equal(broken.probes[0].status.name, 'unreachable');
   assert.equal(broken.probes[0].alerted, true);
   assert.equal(publishes.length, 1);
-  assert.match(publishes[0].message, /Atlas API unreachable after 2 attempt\(s\): HTTP 503/);
+  assert.match(publishes[0].text, /Atlas API unreachable after 2 attempt\(s\): HTTP 503/);
 
   set({ atlasStatus: 200 });
   const back = await run(2);
@@ -162,11 +161,11 @@ test('a persistent HTTP failure is reported as unreachable after retries', async
   assert.equal(publishes.length, 2);
 });
 
-test('a failing ntfy does not stop the state from being recorded', async () => {
+test('a failing email does not stop the state from being recorded', async () => {
   const kv = new MemoryKv();
   const config = makeConfig();
   let probeStatus = 1;
-  let ntfyShouldFail = false;
+  let emailShouldFail = false;
 
   const fetchImpl = async (url, init) => {
     if (String(url).includes('atlas.ripe.net')) {
@@ -175,7 +174,7 @@ test('a failing ntfy does not stop the state from being recorded', async () => {
         headers: { 'content-type': 'application/json' },
       });
     }
-    if (ntfyShouldFail) return new Response('too big', { status: 413 });
+    if (emailShouldFail) return new Response('ValidationError: from address is invalid', { status: 422 });
     return new Response('ok', { status: 200 });
   };
 
@@ -183,7 +182,7 @@ test('a failing ntfy does not stop the state from being recorded', async () => {
 
   await runCheck({ config, kv, fetchImpl, now: now(0) });
   probeStatus = 2;
-  ntfyShouldFail = true;
+  emailShouldFail = true;
   const result = await runCheck({ config, kv, fetchImpl, now: now(1) });
 
   assert.equal(result.probes[0].changed, true);
@@ -230,10 +229,152 @@ test('multiple probes are tracked independently', async () => {
 
   assert.deepEqual(next.probes.filter((probe) => probe.changed).map((probe) => probe.id), [55311]);
   assert.equal(publishes.length, 1);
-  assert.equal(publishes[0].title, 'Atlas 55311 DOWN');
+  assert.match(publishes[0].subject, /\[DOWN\]/);
 
   assert.equal(JSON.parse(await kv.get('probe:55311')).state.lastKey, 'status:2');
   assert.equal(JSON.parse(await kv.get('probe:55312')).state.lastKey, 'status:2');
+});
+
+test('a transition lost to a failed publish is retried on a later run', async () => {
+  const kv = new MemoryKv();
+  const config = makeConfig();
+  let probeStatus = 1;
+  let emailStatus = 200;
+  const publishes = [];
+
+  const fetchImpl = async (url, init) => {
+    if (String(url).includes('atlas.ripe.net')) {
+      const body = atlasPayload(probeStatus, probeStatus === 1 ? 'Connected' : 'Disconnected');
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    publishes.push(JSON.parse(init.body));
+    return new Response(emailStatus === 200 ? '{"id":"msg_1"}' : 'rate limited', { status: emailStatus });
+  };
+
+  const now = (hours) => () => (T0 + hours * HOUR) * 1000;
+
+  await runCheck({ config, kv, fetchImpl, now: now(0) });
+
+  // The disconnect happens on a run where the provider is rate limiting us.
+  probeStatus = 2;
+  emailStatus = 429;
+  const lost = await runCheck({ config, kv, fetchImpl, now: now(1) });
+
+  assert.equal(lost.probes[0].changed, true);
+  assert.equal(lost.probes[0].alerted, false);
+  assert.equal(lost.probes[0].suppressed, true);
+  assert.equal(lost.probes[0].pendingAlert, 'status:2');
+  // One attempt per run: the push is not retried in-run.
+  assert.equal(publishes.length, 1);
+
+  // The state has already advanced, so the next tick reports no transition.
+  // This is the case that used to drop the alert permanently.
+  emailStatus = 200;
+  const retry = await runCheck({ config, kv, fetchImpl, now: now(2) });
+
+  assert.equal(retry.probes[0].changed, false);
+  assert.equal(retry.probes[0].retrying, true);
+  assert.equal(retry.probes[0].alerted, true);
+  assert.equal(retry.probes[0].pendingAlert, null);
+  assert.equal(publishes.length, 2);
+  assert.match(publishes[1].subject, /\[DOWN\]/);
+
+  // Delivered, so it goes quiet again.
+  const quiet = await runCheck({ config, kv, fetchImpl, now: now(3) });
+  assert.equal(quiet.probes[0].alerted, false);
+  assert.equal(quiet.probes[0].retrying, false);
+  assert.equal(publishes.length, 2);
+
+  // The recovery still alerts normally afterwards.
+  probeStatus = 1;
+  const recovered = await runCheck({ config, kv, fetchImpl, now: now(4) });
+  assert.equal(recovered.probes[0].recovery, true);
+  assert.equal(publishes.length, 3);
+  assert.match(publishes[2].subject, /\[RECOVERED\]/);
+});
+
+test('a pending alert waits out its backoff instead of retrying every tick', async () => {
+  const kv = new MemoryKv();
+  const config = makeConfig();
+  let probeStatus = 1;
+  let emailStatus = 200;
+  let attempts = 0;
+
+  const fetchImpl = async (url) => {
+    if (String(url).includes('atlas.ripe.net')) {
+      const body = atlasPayload(probeStatus, probeStatus === 1 ? 'Connected' : 'Disconnected');
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    attempts += 1;
+    return new Response(emailStatus === 200 ? '{"id":"msg_1"}' : 'rate limited', { status: emailStatus });
+  };
+
+  const at = (seconds) => () => (T0 + seconds) * 1000;
+
+  await runCheck({ config, kv, fetchImpl, now: at(0) });
+
+  probeStatus = 2;
+  emailStatus = 429;
+  await runCheck({ config, kv, fetchImpl, now: at(1800) });
+  assert.equal(attempts, 1);
+
+  // First failure backs off 1800s, so a tick 15 minutes later stays quiet.
+  const tooSoon = await runCheck({ config, kv, fetchImpl, now: at(1800 + 900) });
+  assert.equal(tooSoon.probes[0].retrying, false);
+  assert.equal(tooSoon.probes[0].alerted, false);
+  assert.equal(attempts, 1);
+
+  emailStatus = 200;
+  const dueRetry = await runCheck({ config, kv, fetchImpl, now: at(1800 + 1800) });
+  assert.equal(dueRetry.probes[0].retrying, true);
+  assert.equal(dueRetry.probes[0].alerted, true);
+  assert.equal(attempts, 2);
+});
+
+test('a stale pending marker does not resurrect a superseded status', async () => {
+  const kv = new MemoryKv();
+  const config = makeConfig();
+  let probeStatus = 1;
+  let emailStatus = 200;
+
+  const fetchImpl = async (url) => {
+    if (String(url).includes('atlas.ripe.net')) {
+      const body = atlasPayload(probeStatus, probeStatus === 1 ? 'Connected' : 'Disconnected');
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(emailStatus === 200 ? '{"id":"msg_1"}' : 'rate limited', { status: emailStatus });
+  };
+
+  const now = (hours) => () => (T0 + hours * HOUR) * 1000;
+
+  await runCheck({ config, kv, fetchImpl, now: now(0) });
+
+  // Fails while down, then the probe recovers before the retry is due.
+  probeStatus = 2;
+  emailStatus = 429;
+  await runCheck({ config, kv, fetchImpl, now: now(1) });
+  assert.equal(JSON.parse(await kv.get('probe:55311')).state.pendingAlertKey, 'status:2');
+
+  probeStatus = 1;
+  emailStatus = 200;
+  const recovered = await runCheck({ config, kv, fetchImpl, now: now(2) });
+
+  // The all-clear is sent; the superseded disconnect is not re-sent afterwards.
+  assert.equal(recovered.probes[0].recovery, true);
+  assert.equal(recovered.probes[0].alerted, true);
+
+  const steady = await runCheck({ config, kv, fetchImpl, now: now(3) });
+  assert.equal(steady.probes[0].retrying, false);
+  assert.equal(steady.probes[0].alerted, false);
 });
 
 test('readReport reflects the last stored check without calling the API', async () => {
